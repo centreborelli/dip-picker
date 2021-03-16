@@ -1,0 +1,26 @@
+DIP PICKER
+==========
+
+An implementation of "A contrario dip picking for borehole imaging".
+
+
+Compilation
+-----------
+
+# apt install libfftw3-dev libpng-dev libjpeg-dev libtiff-dev libx11-dev
+make -C src
+
+
+Authors
+-------
+
+Gabriele Facciolo
+Rafael Grompone von Gioi
+Enric Meinhardt-Llopis
+
+
+Licence
+-------
+
+This program is distributed for free under the terms of the AGPL licence
+version 3.0, found on file doc/agpl.txt
