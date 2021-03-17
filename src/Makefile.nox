@@ -1,0 +1,9 @@
+CFLAGS = -march=native -O3
+LDLIBS = -ltiff -lpng -lfftw3f -ljpeg -lm
+
+BIN = vnav
+OBJ = iio.o ftr_term.o
+
+$(BIN) : $(OBJ)
+
+clean  : ; $(RM) $(BIN) $(OBJ)
