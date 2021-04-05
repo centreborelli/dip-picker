@@ -12,10 +12,13 @@ We describe an algorithm to perform automatic dip picking on borehole images. On
 
 ## Data
 
+Download and uncompress all the following files in the same folder
+
 * [well-log A](./48_19a-c2.zip)
 * [well-log B](./48_19a-c3.zip)
 * [well-log C](./48_19a-c4.zip)
 * [visualization of manua and automatic detections](./detections.zip)
+
 
 ## Online demo
 
