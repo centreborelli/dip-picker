@@ -9,7 +9,7 @@ We describe an algorithm to perform automatic dip picking on borehole images. On
 ![Teaser](dips1b.jpg)
 
 
-[article](https://library.seg.org/doi/abs/10.1190/geo2020-0392.1) [preprint](https://hal.archives-ouvertes.fr/hal-03203943)  
+[[article]](https://library.seg.org/doi/abs/10.1190/geo2020-0392.1) [[preprint]](https://hal.archives-ouvertes.fr/hal-03203943)  
 
 
 ## Data
