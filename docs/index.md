@@ -19,7 +19,7 @@ Download and uncompress all the following files in the same folder
 * [well-log A](./48-19a-c2.zip)
 * [well-log B](./48-19a-c3.zip)
 * [well-log C](./48-19a-c4.zip)
-* [visualization of manua and automatic detections](./detections.zip)
+* [visualization of manual and automatic detections](./detections.zip)
 
 
 ## Online demo
