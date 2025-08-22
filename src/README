@@ -1,0 +1,12 @@
+# compile the binary tools (vnav) with 
+    make
+
+# run a sample detection on the sample data calling
+# the results are stored is a txt file in the sampledata directory 
+
+   bash samplecall.sh sampledata/48_19a-C2_Ream\ Up\ 3_3B.tif 
+
+
+# visualize the results using the notebook
+   sampledata/dipViewer.ipynb
+
