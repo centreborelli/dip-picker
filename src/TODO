@@ -1,0 +1,3 @@
+1. add more interesting examples to "make tests" (varying dips)
+2. convert between .txt (cosines,pixels) and .csf (degrees,feet)
+3. view .txt or .csv using vnav (with or without image)
