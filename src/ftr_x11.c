@@ -4,7 +4,9 @@
 #include <string.h>
 #include <sys/types.h>
 #include <signal.h>
+#include <stdint.h>
 #include <X11/Xlib.h>
+#include <X11/keysym.h>
 //#include <X11/Xutil.h> // only for XDestroyImage, that can be easily removed
 #include <unistd.h> // only for "fork"
 
@@ -48,6 +50,66 @@ struct _FTR {
 // Check that _FTR can fit inside a FTR
 // (if this line fails, increase the padding at the end of struct FTR on ftr.h)
 typedef char check_FTR_size[sizeof(struct _FTR)<=sizeof(struct FTR)?1:-1];
+
+// Compute how many trailing zero bits a mask has.
+static int mask_shift(unsigned long mask)
+{
+	int s = 0;
+	while (mask && !(mask & 1UL)) {
+		mask >>= 1;
+		s += 1;
+	}
+	return s;
+}
+
+// Compute how many active bits a mask has once it is aligned.
+static int mask_width(unsigned long mask, int shift)
+{
+	mask >>= shift;
+	int w = 0;
+	while (mask & 1UL) {
+		w += 1;
+		mask >>= 1;
+	}
+	return w;
+}
+
+// Scale an 8-bit channel value to a channel mask width.
+static unsigned long scale_channel(uint8_t v, int width)
+{
+	if (width <= 0) return 0;
+	unsigned long maxv = (1UL << width) - 1;
+	return (v * maxv + 127) / 255;
+}
+
+// Rebuild a writable XImage owned by this process.
+static void refresh_ximage_buffer(struct _FTR *f)
+{
+	if (f->ximage) {
+		f->ximage->f.destroy_image(f->ximage);
+		f->ximage = NULL;
+	}
+	int depth = DefaultDepth(f->display, DefaultScreen(f->display));
+	int bpl = ((f->w * 32 + 31) / 32) * 4;
+	unsigned char *buf = calloc((size_t)bpl, (size_t)f->h);
+	if (!buf) exit(fprintf(stderr, "cannot allocate ximage buffer\n"));
+	f->ximage = XCreateImage(f->display, f->visual, depth, ZPixmap, 0,
+			(char *)buf, f->w, f->h, 32, bpl);
+	if (!f->ximage) {
+		free(buf);
+		exit(fprintf(stderr, "cannot create ximage\n"));
+	}
+}
+
+// Wait until the first Expose arrives after mapping the window.
+static void wait_for_first_expose(struct _FTR *f)
+{
+	for (;;) {
+		XEvent event;
+		XNextEvent(f->display, &event);
+		if (event.type == Expose) return;
+	}
+}
 
 
 // for debug purposes
@@ -133,6 +195,7 @@ struct FTR ftr_new_window_with_image_uint8_rgb(unsigned char *x, int w, int h)
 		;
 	XSelectInput(f->display, f->window, mask);
 	XMapWindow(f->display, f->window);
+	wait_for_first_expose(f);
 
 	// general again
 	f->handle_key = ftr_handler_exit_on_ESC;
@@ -145,11 +208,6 @@ struct FTR ftr_new_window_with_image_uint8_rgb(unsigned char *x, int w, int h)
 	f->handle_wheel = NULL;
 	f->stop_loop = 0;
 	f->changed = 0;
-
-	// run the loop until the first expose
-	f->handle_expose2 = ftr_handler_stop_loop;
-	ftr_loop_run((struct FTR *)f);
-	f->handle_expose2 = 0;
 
 	return *(struct FTR *)f;
 }
@@ -183,17 +241,17 @@ static int keycode_to_ftr(struct _FTR *f, int keycode, int keystate)
 	int key = x_keycode_to_keysym(f, keycode);
 	//fprintf(stderr, "keycode to keysym : %d => %d\n", keycode, key);
 
-	if (keycode == 9)   return 27;    // ascii ESC
-	if (keycode == 119) return 127;   // ascii DEL
-	if (keycode == 22)  return '\b';
-	if (keycode == 23)  return '\t';
-	if (keycode == 36 || keycode == 105) return '\n';
-	if (keycode == 111) return FTR_KEY_UP;
-	if (keycode == 113) return FTR_KEY_LEFT;
-	if (keycode == 114) return FTR_KEY_RIGHT;
-	if (keycode == 116) return FTR_KEY_DOWN;
-	if (keycode == 112) return FTR_KEY_PAGE_UP;
-	if (keycode == 117) return FTR_KEY_PAGE_DOWN;
+	if (key == XK_Escape) return 27;
+	if (key == XK_Delete) return 127;
+	if (key == XK_BackSpace) return '\b';
+	if (key == XK_Tab) return '\t';
+	if (key == XK_Return || key == XK_KP_Enter) return '\n';
+	if (key == XK_Up) return FTR_KEY_UP;
+	if (key == XK_Left) return FTR_KEY_LEFT;
+	if (key == XK_Right) return FTR_KEY_RIGHT;
+	if (key == XK_Down) return FTR_KEY_DOWN;
+	if (key == XK_Page_Up) return FTR_KEY_PAGE_UP;
+	if (key == XK_Page_Down) return FTR_KEY_PAGE_DOWN;
 	return key;
 }
 
@@ -233,19 +291,35 @@ static void process_next_event(struct FTR *ff)
 		f->changed = 0;
 
 		if (!f->ximage || f->imgupdate) {
-			if (f->ximage) f->ximage->f.destroy_image(f->ximage);
-			//f->ximage = XShmGetImage(f->display, f->window,
-			//		0, 0, f->w, f->h, AllPlanes, ZPixmap);
-			f->ximage = XGetImage(f->display, f->window,
-					0, 0, f->w, f->h, AllPlanes, ZPixmap);
+			refresh_ximage_buffer(f);
 			f->imgupdate = 0;
 		}
+
+		// Convert RGB bytes to the server-side pixel layout described by masks.
+		int rs = mask_shift(f->ximage->red_mask);
+		int gs = mask_shift(f->ximage->green_mask);
+		int bs = mask_shift(f->ximage->blue_mask);
+		int rw = mask_width(f->ximage->red_mask, rs);
+		int gw = mask_width(f->ximage->green_mask, gs);
+		int bw = mask_width(f->ximage->blue_mask, bs);
+		int bytespp = f->ximage->bits_per_pixel / 8;
 		for (int i = 0; i < f->w*f->h; i++) {
-			// drain bramage
-			f->ximage->data[4*i+0] = f->rgb[3*i+2];
-			f->ximage->data[4*i+1] = f->rgb[3*i+1];
-			f->ximage->data[4*i+2] = f->rgb[3*i+0];
-			f->ximage->data[4*i+3] = 0;
+			unsigned long px = 0;
+			px |= scale_channel(f->rgb[3*i+0], rw) << rs;
+			px |= scale_channel(f->rgb[3*i+1], gw) << gs;
+			px |= scale_channel(f->rgb[3*i+2], bw) << bs;
+			int x = i % f->w;
+			int y = i / f->w;
+			unsigned char *dst = (unsigned char *)f->ximage->data
+				+ y * f->ximage->bytes_per_line
+				+ x * bytespp;
+			if (f->ximage->byte_order == LSBFirst) {
+				for (int b = 0; b < bytespp; b++)
+					dst[b] = (px >> (8 * b)) & 0xff;
+			} else {
+				for (int b = 0; b < bytespp; b++)
+					dst[b] = (px >> (8 * (bytespp - 1 - b))) & 0xff;
+			}
 		}
 		//XShmPutImage(f->display, f->window, f->gc, f->ximage,
 		//		0, 0, 0, 0, f->w, f->h, 0);
