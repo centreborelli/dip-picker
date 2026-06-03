@@ -37,6 +37,9 @@ struct _FTR {
 	int glut_keymod_mask;
 	int glut_window_x;
 	int glut_window_y;
+
+	// pixel scaling (internal)
+	int s;
 };
 
 // Check that _FTR can fit inside a FTR
@@ -72,7 +75,7 @@ static void my_displayfunc(void)
 	glViewport(0, 0, f->w, f->h);
 
 	glRasterPos2i(-1,1);
-	glPixelZoom(1,-1);
+	glPixelZoom(f->s, -f->s);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1); // ugly
 
 	//fprintf(stderr, "glDrawPixels %p\n", f->rgb);
@@ -121,7 +124,8 @@ static void my_specialfunc(int k, int x, int y)
 	struct _FTR *f = ftr_freeglut_global_state;
 	if (f->handle_key) {
 		int m = modifiers_from_glut_to_ftr(glutGetModifiers());
-		f->handle_key((void*)f, key_from_glut_to_ftr(k), m, x, y);
+		f->handle_key((void*)f, key_from_glut_to_ftr(k), m,
+				x/f->s, y/f->s);
 		if (f->changed)
 			glutPostRedisplay();
 	}
@@ -136,7 +140,7 @@ static void my_keyboardfunc(unsigned char k, int x, int y)
 
 	if (f->handle_key) {
 		int m = modifiers_from_glut_to_ftr(glutGetModifiers());
-		f->handle_key((void*)f, k, m, x, y);
+		f->handle_key((void*)f, k, m, x/f->s, y/f->s);
 		if (f->changed)
 			glutPostRedisplay();
 	}
@@ -159,7 +163,7 @@ static void my_mousefunc(int b, int s, int x, int y)
 		if (s && (B == FTR_BUTTON_UP || B == FTR_BUTTON_DOWN))
 			return;
 		int m = modifiers_from_glut_to_ftr(glutGetModifiers());
-		f->handle_button((void*)f, B*(s?-1:1), m, x, y);
+		f->handle_button((void*)f, B*(s?-1:1), m, x/f->s, y/f->s);
 		if (f->changed)
 			glutPostRedisplay();
 	}
@@ -177,7 +181,8 @@ static void my_passivemotionfunc(int x, int y)
 		int m = modifiers_from_glut_to_ftr(glutGetModifiers());
 		if (f->changed)
 			glutPostRedisplay();
-		f->handle_motion((void*)f, 0, m|f->glut_button_mask, x, y);
+		f->handle_motion((void*)f, 0, m|f->glut_button_mask,
+				x/f->s, y/f->s);
 	}
 	f->handle_mute = 0;
 }
@@ -185,6 +190,7 @@ static void my_passivemotionfunc(int x, int y)
 static void my_motionfunc(int x, int y)
 {
 	//fprintf(stderr, "GLUT motionfunc %d %d\n", x, y);
+	struct _FTR *f = ftr_freeglut_global_state;
 	my_passivemotionfunc(x, y);
 }
 
@@ -203,6 +209,14 @@ static void my_idle(void)
 	}
 }
 
+static char *name_with_pid(void)
+{
+	static char n[FILENAME_MAX];
+	pid_t p = getpid();
+	snprintf(n, FILENAME_MAX, "ftr_win_pid_%d", p);
+	return n;
+}
+
 // setup_glut_environment {{{2
 static void setup_glut_environment(struct _FTR *f)
 {
@@ -212,8 +226,8 @@ static void setup_glut_environment(struct _FTR *f)
 	glutInitDisplayMode(GLUT_DOUBLE|GLUT_RGB|GLUT_DEPTH);
 	glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE,
 			GLUT_ACTION_GLUTMAINLOOP_RETURNS);
-	glutCreateWindow("Whatever");
-	glutReshapeWindow(f->w, f->h);
+	glutCreateWindow(name_with_pid());
+	glutReshapeWindow(f->w * f->s, f->h * f->s);
 	glutDisplayFunc(my_displayfunc);
 	glutReshapeFunc(my_reshapefunc);
 	glutIdleFunc(NULL);
@@ -228,6 +242,12 @@ static void setup_glut_environment(struct _FTR *f)
 	//fprintf(stderr, "setup glut rgb = %p\n", f->rgb);
 	if (f->glut_window_x >= 0)
 		glutPositionWindow(f->glut_window_x, f->glut_window_y);
+}
+
+static int getenv_int(char *s, int d)
+{
+	char *t = getenv(s);
+	return t ? atoi(t) : d;
 }
 
 
@@ -256,6 +276,7 @@ struct FTR ftr_new_window_with_image_uint8_rgb(unsigned char *x, int w, int h)
 	f->glut_initted = 0;
 	f->glut_button_mask = 0;
 	f->glut_window_x = f->glut_window_y = -1;
+	f->s = getenv_int("FTR_SCALING", 1);
 
 	// freeglut specific part
 	setup_glut_environment(f);
@@ -264,7 +285,11 @@ struct FTR ftr_new_window_with_image_uint8_rgb(unsigned char *x, int w, int h)
 	//ftr_loop_run((struct FTR *)f);
 	//f->handle_expose2 = 0;
 
-	return *(struct FTR *)f;
+	//return *(struct FTR *)f;
+	// avoid stupid type-punning warning:
+	struct FTR F[1];
+	memcpy(F, f, sizeof f);
+	return *F;
 }
 
 // ftr_close {{{2
@@ -315,6 +340,12 @@ void ftr_notify_the_desire_to_stop_this_loop(struct FTR *ff, int retval)
 	f->glut_window_y = glutGet(GLUT_WINDOW_Y);
 
 	glutLeaveMainLoop();
+}
+
+void ftr_x11_force_redraw(struct FTR *ff)
+{
+	// just ignore it
+	(void)ff;
 }
 
 #include "ftr_common_inc.c"
