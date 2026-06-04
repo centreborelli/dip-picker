@@ -40,6 +40,12 @@ struct _FTR {
 	Window window;
 	GC gc;
 	XImage *ximage;
+	int depth;
+	int bits_per_pixel;
+	int bytes_per_line;
+	unsigned long red_mask;
+	unsigned long green_mask;
+	unsigned long blue_mask;
 	int imgupdate;
 
 	int wheel_ax;
@@ -102,6 +108,79 @@ static int getenv_int(char *s, int d)
 	return t ? atoi(t) : d;
 }
 
+// Pack one 8-bit color channel into the bit range selected by an X11 mask.
+static unsigned long pack_channel(unsigned char value, unsigned long mask)
+{
+	if (!mask) return 0;
+	int shift = 0;
+	while (((mask >> shift) & 1ul) == 0)
+		shift += 1;
+	int bits = 0;
+	while ((mask >> (shift + bits)) & 1ul)
+		bits += 1;
+	unsigned long maxv = (1ul << bits) - 1;
+	unsigned long scaled = (value * maxv + 127) / 255;
+	return (scaled << shift) & mask;
+}
+
+// Write one RGB pixel using the actual XImage layout instead of assuming BGRA.
+static void put_ximage_pixel(struct _FTR *f, int x, int y,
+		unsigned char r, unsigned char g, unsigned char b)
+{
+	int bytes_per_pixel = (f->bits_per_pixel + 7) / 8;
+	unsigned long pixel = 0;
+	pixel |= pack_channel(r, f->red_mask);
+	pixel |= pack_channel(g, f->green_mask);
+	pixel |= pack_channel(b, f->blue_mask);
+
+	unsigned char *dst = (unsigned char *)f->ximage->data
+		+ y * f->bytes_per_line
+		+ x * bytes_per_pixel;
+	if (f->ximage->byte_order == LSBFirst)
+		for (int k = 0; k < bytes_per_pixel; k++)
+			dst[k] = (pixel >> (8 * k)) & 0xff;
+	else
+		for (int k = 0; k < bytes_per_pixel; k++)
+			dst[k] = (pixel >> (8 * (bytes_per_pixel - 1 - k))) & 0xff;
+}
+
+// XQuartz rejects the old XGetImage(window, ...) startup assumption, so keep a
+// backend-owned XImage buffer that matches the server's truecolor layout.
+static void recreate_ximage(struct _FTR *f)
+{
+	if (f->ximage) {
+		f->ximage->f.destroy_image(f->ximage);
+		f->ximage = NULL;
+	}
+
+	f->ximage = XCreateImage(f->display, f->visual, f->depth, ZPixmap, 0,
+			NULL, f->W, f->H, 32, 0);
+	if (!f->ximage)
+		exit(fprintf(stderr, "ftr_x11: XCreateImage failed for %dx%d image\n",
+				f->W, f->H));
+
+	f->bits_per_pixel = f->ximage->bits_per_pixel;
+	f->bytes_per_line = f->ximage->bytes_per_line;
+	f->red_mask = f->ximage->red_mask;
+	f->green_mask = f->ximage->green_mask;
+	f->blue_mask = f->ximage->blue_mask;
+
+	int bytes_per_pixel = (f->bits_per_pixel + 7) / 8;
+	if (f->ximage->format != ZPixmap || !f->red_mask || !f->green_mask
+			|| !f->blue_mask || bytes_per_pixel < 2 || bytes_per_pixel > 4)
+		exit(fprintf(stderr,
+			"ftr_x11: unsupported XImage layout format=%d depth=%d bpp=%d masks=%lx/%lx/%lx\n",
+			f->ximage->format, f->depth, f->bits_per_pixel,
+			f->red_mask, f->green_mask, f->blue_mask));
+
+	size_t nbytes = (size_t)f->bytes_per_line * f->H;
+	f->ximage->data = calloc(nbytes, 1);
+	if (!f->ximage->data)
+		exit(fprintf(stderr,
+			"ftr_x11: cannot allocate %zu bytes for XImage buffer\n",
+			nbytes));
+}
+
 struct FTR ftr_new_window_with_image_uint8_rgb(unsigned char *x, int w, int h)
 {
 	struct _FTR f[1];
@@ -131,11 +210,17 @@ struct FTR ftr_new_window_with_image_uint8_rgb(unsigned char *x, int w, int h)
 	int black = BlackPixel(f->display, s);
 	f->gc = DefaultGC(f->display, s);
 	f->visual = DefaultVisual(f->display, s);
+	f->depth = DefaultDepth(f->display, s);
 	f->window = XCreateSimpleWindow(f->display, RootWindow(f->display, s),
 			10, 10, f->W, f->H, 1, black, white);
 			//white, black);
 	XStoreName(f->display, f->window, "ftr");
 	f->ximage = NULL;
+	f->bits_per_pixel = 0;
+	f->bytes_per_line = 0;
+	f->red_mask = 0;
+	f->green_mask = 0;
+	f->blue_mask = 0;
 	f->imgupdate = 1;
 	f->wheel_ax = 0;
 	int mask = 0
@@ -267,40 +352,20 @@ static void process_next_event(struct FTR *ff)
 		f->changed = 0;
 
 		if (!f->ximage || f->imgupdate) {
-			if (f->ximage) f->ximage->f.destroy_image(f->ximage);
-			//f->ximage = XShmGetImage(f->display, f->window,
-			//		0, 0, f->w, f->h, AllPlanes, ZPixmap);
-			f->ximage = XGetImage(f->display, f->window,
-				0, 0, f->W, f->H, AllPlanes, ZPixmap);
+			// XQuartz can fail with BadMatch here, so do not probe the
+			// window image; reallocate our own XImage with matching metadata.
+			recreate_ximage(f);
 			f->imgupdate = 0;
 		}
-		if (f->s == 1)
-		for (int i = 0; i < f->w*f->h; i++) {
-			// drain bramage
-			f->ximage->data[4*i+0] = f->rgb[3*i+2];
-			f->ximage->data[4*i+1] = f->rgb[3*i+1];
-			f->ximage->data[4*i+2] = f->rgb[3*i+0];
-			f->ximage->data[4*i+3] = 0;
-		}
-
-		// OK, boys, this is where the actual fucking happens
-		if (f->s > 1) {
-			int s = f->s;
-			for (int j = 0; j < f->h; j++)
-			for (int i = 0; i < f->w; i++)
-			{
-				int ij = i + j*f->w;
-				int IJ = s*i + s*j*f->W;
-				for (int q = 0; q < s; q++)
-				for (int p = 0; p < s; p++)
-				{
-					int Ip = IJ + p + q*f->W;
-					f->ximage->data[4*Ip+0]= f->rgb[3*ij+2];
-					f->ximage->data[4*Ip+1]= f->rgb[3*ij+1];
-					f->ximage->data[4*Ip+2]= f->rgb[3*ij+0];
-					f->ximage->data[4*Ip+3]= 0;
-				}
-			}
+		for (int j = 0; j < f->h; j++)
+		for (int i = 0; i < f->w; i++) {
+			int ij = i + j * f->w;
+			unsigned char r = f->rgb[3 * ij + 0];
+			unsigned char g = f->rgb[3 * ij + 1];
+			unsigned char b = f->rgb[3 * ij + 2];
+			for (int q = 0; q < f->s; q++)
+			for (int p = 0; p < f->s; p++)
+				put_ximage_pixel(f, f->s * i + p, f->s * j + q, r, g, b);
 		}
 		//XShmPutImage(f->display, f->window, f->gc, f->ximage,
 		//		0, 0, 0, 0, f->w, f->h, 0);
